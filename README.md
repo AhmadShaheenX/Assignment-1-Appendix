@@ -7,4 +7,4 @@ Guide:
 2. I then specifically ran my code script HTIN5005_Assignment1_Shaheen.R to reproduce the results/graphs in my assignment.
 
 I have also attached the link to the original Github link for the dataset I used:
-https://github.com/yaleemmlc/admissionprediction?
+https://github.com/yaleemmlc/admissionprediction
