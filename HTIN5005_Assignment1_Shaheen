@@ -1,0 +1,103 @@
+library(xgboost)
+library(pROC)
+library(Matrix)
+
+load("Results/5v_cleandf.RData")
+source("Scripts/R/24_usetopvars.R")
+df_top <- usetopvars(df)
+
+y_raw <- as.character(df$disposition)
+y <- as.integer(as.factor(y_raw)) - 1L
+y[is.na(y)] <- 0
+
+X_df <- df_top[, setdiff(colnames(df_top), c("disposition", "arrivalmode.ambulance"))]
+X <- as.matrix(sapply(X_df, as.numeric))
+X[is.na(X)] <- 0
+
+set.seed(42)
+train_idx <- sample(seq_len(nrow(X)), size = floor(0.8 * nrow(X)))
+
+dtrain <- xgb.DMatrix(data = Matrix(X[train_idx, ], sparse = TRUE), label = y[train_idx])
+dtest  <- xgb.DMatrix(data = Matrix(X[-train_idx, ], sparse = TRUE), label = y[-train_idx])
+
+params <- list(objective = "binary:logistic", eval_metric = "auc", max_depth = 6, learning_rate = 0.1)
+xgb_model <- xgb.train(params = params, data = dtrain, nrounds = 100)
+
+preds <- predict(xgb_model, dtest)
+true_labels <- y[-train_idx]
+predicted_classes <- ifelse(preds > 0.5, 1, 0)
+roc_obj <- roc(true_labels, preds)
+importance_matrix <- xgb.importance(feature_names = colnames(X), model = xgb_model)
+
+plot(roc_obj, col = "red", lwd = 3, main = "ROC Curve: Patient Admission Prediction")
+
+xgb.plot.importance(importance_matrix[1:10, ], main = "Top 10 Predictor Variables")
+
+density_admitted <- density(preds[true_labels == 1])
+density_discharged <- density(preds[true_labels == 0])
+plot(density_discharged, col = "blue", lwd = 3, 
+     main = "Model Confidence: Predicted Probability Distribution",
+     xlab = "Predicted Probability of Admission", 
+     ylim = c(0, max(c(density_admitted$y, density_discharged$y)) + 0.5))
+lines(density_admitted, col = "red", lwd = 3)
+legend("topright", legend = c("Actual Discharge", "Actual Admission"), fill = c("blue", "red"))
+
+conf_matrix <- table(Actual = true_labels, Predicted = predicted_classes)
+mosaicplot(conf_matrix, main = "Confusion Matrix: Actual vs. Predicted Outcomes",
+           color = c("lightcoral", "lightblue"), xlab = "Actual Outcome", ylab = "Predicted Outcome")
+
+pred_bins <- cut(preds, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)
+obs_rate <- tapply(true_labels, pred_bins, mean)
+pred_mean <- tapply(preds, pred_bins, mean)
+plot(pred_mean, obs_rate, type = "b", pch = 19, col = "darkgreen", lwd = 3,
+     main = "Calibration Curve: Prediction Reliability",
+     xlab = "Mean Predicted Probability", ylab = "Observed Admission Rate",
+     xlim = c(0, 1), ylim = c(0, 1))
+abline(0, 1, lty = 2, col = "gray", lwd = 2)
+
+top_feature_name <- importance_matrix$Feature[1]
+boxplot(X[-train_idx, top_feature_name] ~ true_labels, col = c("lightblue", "lightcoral"),
+        main = paste("Clinical Distribution of:", top_feature_name),
+        xlab = "Actual Outcome (0 = Discharge, 1 = Admission)", ylab = "Feature Value")
+
+thresholds <- seq(0, 1, length.out = 100)
+precisions <- numeric(100); recalls <- numeric(100)
+for(i in 1:100) {
+  tp <- sum(preds >= thresholds[i] & true_labels == 1)
+  fp <- sum(preds >= thresholds[i] & true_labels == 0)
+  fn <- sum(preds < thresholds[i] & true_labels == 1)
+  precisions[i] <- ifelse((tp + fp) == 0, 1, tp / (tp + fp))
+  recalls[i] <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
+}
+plot(recalls, precisions, type = "l", col = "purple", lwd = 3, 
+     main = "Precision-Recall Curve (Resource Allocation Trade-off)",
+     xlab = "Recall (Sensitivity)", ylab = "Precision (Positive Predictive Value)")
+
+cum_gain <- cumsum(importance_matrix$Gain)
+plot(1:length(cum_gain), cum_gain, type = "b", pch = 16, col = "darkorange", lwd = 2,
+     main = "Cumulative Feature Importance (Lasso-style Selection)",
+     xlab = "Number of Features Included", ylab = "Cumulative Gain", ylim = c(0, 1))
+abline(h = 0.90, col = "gray", lty = 2) 
+
+rank_preds <- rank(preds, ties.method = "random")
+deciles <- as.integer(cut(rank_preds, breaks = 10))
+obs_rate_decile <- tapply(true_labels, deciles, mean)
+pred_rate_decile <- tapply(preds, deciles, mean)
+barplot(rbind(obs_rate_decile, pred_rate_decile), beside = TRUE, 
+        col = c("lightcoral", "lightblue"), names.arg = 1:10, 
+        main = "Patient Sorting: Admission Rate by Predicted Risk Decile",
+        xlab = "Risk Decile (1 = Lowest Risk, 10 = Highest Risk)", ylab = "Admission Rate")
+legend("topleft", legend = c("Actual Rate", "Predicted Rate"), fill = c("lightcoral", "lightblue"))
+
+if ("age" %in% colnames(X)) {
+  age_data <- X[-train_idx, "age"]
+  pred_by_age <- tapply(preds, age_data, mean)
+  age_numeric <- as.numeric(names(pred_by_age))
+  
+  plot(age_numeric, pred_by_age, pch = 16, col = "darkgray", 
+       main = "Capturing Non-Linearity: Patient Age vs. Admission Risk",
+       xlab = "Patient Age", ylab = "Mean Predicted Probability")
+  
+  loess_fit <- loess(pred_by_age ~ age_numeric)
+  lines(age_numeric, predict(loess_fit), col = "blue", lwd = 3)
+}
